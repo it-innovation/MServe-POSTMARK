@@ -36,6 +36,7 @@ import settings as settings
 import paramiko
 import uuid
 import tarfile
+import zipfile
 import simplejson as json
 from django.core.files import File
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -52,11 +53,18 @@ def tar_files(temp_tarfile, base_dir, files):
         tar.add(fname, arcname=aname)
     tar.close()
 
+def zip_files(temp_zipfile, base_dir, files):
+    zip = zipfile.ZipFile(temp_zipfile, mode="w")
+    for name in files:
+        fname = os.path.join(base_dir, name)
+        aname = os.path.relpath(fname, base_dir)
+        zip.write(fname,arcname=aname,compress_type=zipfile.ZIP_DEFLATED)
+    zip.close()
 
 def get_files(directory, prefix=None, suffix=None, after=None):
-    _files=[]
+    _files = []
     for fname in os.listdir(directory):
-        file = os.path.join(directory,fname)
+        file = os.path.join(directory, fname)
         if not os.path.isfile(file):
             continue
         if after:
@@ -64,44 +72,50 @@ def get_files(directory, prefix=None, suffix=None, after=None):
             if datetime.datetime.fromtimestamp(mtime) <= after:
                 continue
         if prefix:
-            if not re.match(prefix,fname):
+            if not re.match(prefix, fname):
                 continue
         if suffix:
-            if not re.search(suffix+"$",fname):
+            if not re.search(suffix + "$", fname):
                 continue
         _files.append(file)
     return _files
 
 
-def _ssh_r2d(file, export_type, tmp_folder, start_frame=1, end_frame=2):
-
+def _ssh_r2d(files, export_type, tmp_folder, start_frame=1, end_frame=2):
     ssh = MultiSSHClient()
+    result = {}
 
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(settings.R3D_HOST, username=settings.R3D_USER, password=settings.R3D_PASS)
-    #output_file_dir,output_file_name = os.path.split(tmpimage)
 
-    command = "redline --i %s --outDir %s/%s --exportPreset %s -s %s -e %s" % (file, tmp_folder, export_type, start_frame, end_frame)
-    logging.info(command)
+    for file in files:
+        command = "redline --i %s --outDir %s --exportPreset %s -s %s -e %s" % (file, tmp_folder, export_type, start_frame, end_frame)
+        logging.info(command)
 
-    stdin, stdout, stderr = ssh.exec_command(command)
-
-    result = {}
-    result["stdout"] = stdout.readlines()
-    result["sdterr"] = stderr.readlines()
+        stdin, stdout, stderr = ssh.exec_command(command)
+        result[file] = {}
+        result[file]["stdout"] = stdout.readlines()
+        result[file]["sdterr"] = stderr.readlines()
 
     return result
 
-@task
-def red2dtranscode(inputs,outputs,options={},callbacks=[]):
+def _mfile_to_mount(mf):
+    remote_mount = settings.R3D_MOUNT
+    local_mount = settings.STORAGE_ROOT
+    if mf.service.container.default_path:
+        local_mount = os.path.join(settings.STORAGE_ROOT, mf.service.container.default_path)
+    mf_local_path = mf.file.path
+    mf_remote_path = mf_local_path.replace(local_mount,remote_mount)
+    return mf_remote_path
 
+@task
+def red2dtranscode(inputs, outputs, options={}, callbacks=[]):
+    ''' Perform a 2D transcode using the redline tool '''
     started = datetime.datetime.now()
 
-    logging.info("Inputs %s"% (inputs))
-    if len(inputs) > 0:
-        input_mfile  = MFile.objects.get(id=inputs[0])
-        logging.info("R2D input file %s" % input_mfile)
-        remote_mount = "/Volumes/ifs/mserve/"
+    logging.info("Inputs %s" % (inputs))
+    if len(inputs) > 0: 
+        input_mfile = MFile.objects.get(id=inputs[0])
 
         start_frame = 1
         if "start_frame" in options:
@@ -114,61 +128,70 @@ def red2dtranscode(inputs,outputs,options={},callbacks=[]):
         export_type = "tiff"
         if "export_type" in options and options["export_type"] != "":
             export_type = options["export_type"]
-        
-        file_local_mount = os.path.join(settings.STORAGE_ROOT)
+
+        # Take the input MFile and get all associated files to operate on - temp fix until we can update the UI for folder structures
+        input_mfiles = [input_mfile]
+        if not input_mfile.folder is None:
+            input_mfiles = input_mfile.folder.mfile_set.all()
+
+        inputs = map (_mfile_to_mount, input_mfiles)
+        remote_mount = settings.R3D_MOUNT
+        local_mount = settings.STORAGE_ROOT
         if input_mfile.service.container.default_path:
-            file_local_mount = os.path.join(settings.STORAGE_ROOT, input_mfile.service.container.default_path)
+            local_mount = os.path.join(settings.STORAGE_ROOT, input_mfile.service.container.default_path)
+        temp_folder_uuid = "r2d-transcode-" + str(uuid.uuid4())
+        remote_image = os.path.join(remote_mount, temp_folder_uuid)
+        local_image = os.path.join(local_mount, temp_folder_uuid)
 
-        file_path=input_mfile.file.path
-        file_relative= os.path.join(file_path.replace(file_local_mount,remote_mount))
-        tfile_uuid = "r2d-transcode-"+str(uuid.uuid4())
-        remoteimage = os.path.join(remote_mount,tfile_uuid)
-        localimage = os.path.join(file_local_mount,tfile_uuid)
+        for mf_in in inputs:
+            file_path = input_mfile.file.path
+            logging.info("Selected R2D input file %s" % mf_in)
+            logging.info("Processing file_path %s" % file_path)
+            if input_mfile.service.container.default_path:
+                logging.info("file_local_mount %s" % local_mount)
+                file_relative = os.path.join(settings.R3D_MOUNT, input_mfile.service.container.default_path)
+                logging.info("file_remote_mount %s" % file_relative)
+            logging.info("remote_image %s" % remote_image)
+            logging.info("local_image %s" % local_image)
 
-        logging.info("file_local_mount %s" % file_local_mount)
-        logging.info("file_path %s" % file_path)
-        logging.info("file_relative %s" % file_relative)
-        logging.info("remoteimage %s" % remoteimage)
-        logging.info("localimage %s" % localimage)
+        result = _ssh_r2d(inputs, export_type, remote_image, start_frame=start_frame, end_frame=end_frame)
 
-        result = _ssh_r2d(file_relative,export_type,remoteimage,start_frame=start_frame,end_frame=end_frame)
+        files = os.listdir(local_image)
+        temp_archive = tempfile.NamedTemporaryFile('wb')
+        zip_files(temp_archive.name, local_image, files)
+        output_file = open(temp_archive.name, 'r')
 
-        localdir = os.path.join(file_local_mount,tfile_uuid)
-        files = os.listdir(localdir)
-        temp_tarfile = tempfile.NamedTemporaryFile('wb')
-        tar_files(temp_tarfile.name, localdir, files)
-        outputfile = open(temp_tarfile.name, 'r')
+        logging.info("output_file %s", output_file)
 
-        logging.info("outputfile %s", outputfile)
+        if output_file:
+            suf = SimpleUploadedFile("mfile", output_file.read(), content_type='image/tiff')
 
-        if outputfile:
-            suf = SimpleUploadedFile("mfile",outputfile.read(), content_type='image/tiff')
-
-            if len(outputs)>0:
+            if len(outputs) > 0:
                 jo = JobOutput.objects.get(id=outputs[0])
-                jo.file.save('results.tar.gz', suf, save=True)
+                jo.file.save('results.zip', suf, save=True)
             else:
                 logging.error("Nowhere to save output")
 
-            outputfile.close()
+            output_file.close()
         else:
-            raise Exception("Unable to get outputfile location")
+            raise Exception("Unable to get output_file location")
 
-        return {"message":"R2D successful"}
+        return {"message": "R2D successful"}
     else:
         logging.error("No input given")
     raise
 
-def _ssh_r3d(left_eye_file,right_eye_file,tmpimage, start_frame=1, end_frame=2):
 
+def _ssh_r3d(left_eye_file, right_eye_file, tmpimage, start_frame=1, end_frame=2):
     ssh = MultiSSHClient()
 
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(settings.R3D_HOST, username=settings.R3D_USER, password=settings.R3D_PASS)
     clip_settings_file = "/Volumes/Media/masterRMD"
-    output_file_dir,output_file_name = os.path.split(tmpimage)
+    output_file_dir, output_file_name = os.path.split(tmpimage)
 
-    command = "redline -i3d %s %s -outDir %s -o %s --exportPreset 3Dtiff --makeSubDir --s  %s --e  %s --masterRMDFolder %s " % (left_eye_file,right_eye_file,output_file_dir,output_file_name,start_frame,end_frame,clip_settings_file)
+    command = "redline -i3d %s %s -outDir %s -o %s --exportPreset 3Dtiff --makeSubDir --s  %s --e  %s --masterRMDFolder %s " % (
+    left_eye_file, right_eye_file, output_file_dir, output_file_name, start_frame, end_frame, clip_settings_file)
 
     logging.info(command)
 
@@ -182,11 +205,10 @@ def _ssh_r3d(left_eye_file,right_eye_file,tmpimage, start_frame=1, end_frame=2):
 
 
 @task
-def red3dmux(inputs,outputs,options={},callbacks=[]):
-
-    logging.info("Inputs %s"% (inputs))
+def red3dmux(inputs, outputs, options={}, callbacks=[]):
+    logging.info("Inputs %s" % (inputs))
     if len(inputs) > 0:
-        left  = MFile.objects.get(id=inputs[0])
+        left = MFile.objects.get(id=inputs[0])
         logging.info("Left %s" % left)
         if len(inputs) > 1:
             right = MFile.objects.get(id=inputs[1])
@@ -201,19 +223,20 @@ def red3dmux(inputs,outputs,options={},callbacks=[]):
             if "end_frame" in options:
                 end_frame = options["end_frame"]
 
-            left_local_mount = os.path.join(settings.STORAGE_ROOT,left.service.container.default_path)
-            right_local_mount = os.path.join(settings.STORAGE_ROOT,right.service.container.default_path)
+            left_local_mount = os.path.join(settings.STORAGE_ROOT, left.service.container.default_path)
+            right_local_mount = os.path.join(settings.STORAGE_ROOT, right.service.container.default_path)
 
-            left_path=left.file.path
-            right_path=right.file.path
+            left_path = left.file.path
+            right_path = right.file.path
 
-            left_relative=left_path.replace(left_local_mount,remote_mount)
-            right_relative=right_path.replace(right_local_mount,remote_mount)
+            left_relative = left_path.replace(left_local_mount, remote_mount)
+            right_relative = right_path.replace(right_local_mount, remote_mount)
 
-            tfile_uuid = "r3d-image-"+str(uuid.uuid4())
-            remoteimage = os.path.join(remote_mount,tfile_uuid)
+            tfile_uuid = "r3d-image-" + str(uuid.uuid4())
+            remoteimage = os.path.join(remote_mount, tfile_uuid)
 
-            localimage = os.path.join(settings.STORAGE_ROOT,left.service.container.default_path,tfile_uuid,tfile_uuid+".000004.tif")
+            localimage = os.path.join(settings.STORAGE_ROOT, left.service.container.default_path, tfile_uuid,
+                tfile_uuid + ".000004.tif")
 
             logging.info("left_local_mount %s" % left_local_mount)
             logging.info("right_local_mount %s" % right_local_mount)
@@ -224,38 +247,38 @@ def red3dmux(inputs,outputs,options={},callbacks=[]):
             logging.info("remoteimage %s" % remoteimage)
             logging.info("localimage %s" % localimage)
 
-            result = _ssh_r3d(left_relative,right_relative,remoteimage,start_frame=start_frame,end_frame=end_frame)
+            result = _ssh_r3d(left_relative, right_relative, remoteimage, start_frame=start_frame, end_frame=end_frame)
 
             logging.info(result)
 
             # TODO: Change to local in deployment
-            outputfile = open(localimage,'r')
+            outputfile = open(localimage, 'r')
             #outputfile = open(remoteimage,'r')
 
-            suf = SimpleUploadedFile("mfile",outputfile.read(), content_type='image/tiff')
+            suf = SimpleUploadedFile("mfile", outputfile.read(), content_type='image/tiff')
 
-            if len(outputs)>0:
+            if len(outputs) > 0:
                 jo = JobOutput.objects.get(id=outputs[0])
-                jo.file.save('image.jpg', suf, save=True)
+                jo.file.save('image.tiff', suf, save=True)
             else:
                 logging.error("Nowhere to save output")
 
             outputfile.close()
 
-            return {"message":"R3D successful"}
+            return {"message": "R3D successful"}
         else:
             logging.error("No right eye input given")
     else:
         logging.error("No left eye input given")
     raise
 
-def _drop_folder(filepath,inputfolder,outputfolder):
 
+def _drop_folder(filepath, inputfolder, outputfolder):
     try:
         uid = utils.unique_id()
-        name = "%s_%s" % (uid,os.path.basename(filepath))
-        inputfile = os.path.join(inputfolder,name)
-        outputfile = os.path.join(outputfolder,name)
+        name = "%s_%s" % (uid, os.path.basename(filepath))
+        inputfile = os.path.join(inputfolder, name)
+        outputfile = os.path.join(outputfolder, name)
         shutil.copy(filepath, inputfile)
 
         exists = os.path.exists(outputfile)
@@ -269,14 +292,14 @@ def _drop_folder(filepath,inputfolder,outputfolder):
         # Wait until file stops growing
         growing = True
         size = os.path.getsize(outputfile)
-        logging.info("Size is %s"%str(size))
+        logging.info("Size is %s" % str(size))
         while growing:
             time.sleep(10)
             newsize = os.path.getsize(outputfile)
-            logging.info("Size is now %s"%str(newsize))
-            growing = (size!=newsize)
+            logging.info("Size is now %s" % str(newsize))
+            growing = (size != newsize)
             size = newsize
-            logging.info("File Growing  %s"% growing)
+            logging.info("File Growing  %s" % growing)
 
         return outputfile
 
@@ -287,19 +310,18 @@ def _drop_folder(filepath,inputfolder,outputfolder):
 
 
 @task
-def digitalrapids(inputs,outputs,options={},callbacks=[]):
+def digitalrapids(inputs, outputs, options={}, callbacks=[]):
+    baseinputdir = settings.DIGITAL_RAPIDS_INPUT_DIR
+    baseoutputdir = settings.DIGITAL_RAPIDS_OUTPUT_DIR
 
-    baseinputdir    = settings.DIGITAL_RAPIDS_INPUT_DIR
-    baseoutputdir   = settings.DIGITAL_RAPIDS_OUTPUT_DIR
+    inputdir = os.path.join(baseinputdir)
+    outputdir = os.path.join(baseoutputdir)
 
-    inputdir    = os.path.join(baseinputdir)
-    outputdir   = os.path.join(baseoutputdir)
-    
     try:
-    
         mfileid = inputs[0]
         joboutput = outputs[0]
         from dataservice.models import MFile
+
         mf = MFile.objects.get(id=mfileid)
         videopath = mf.file.path
 
@@ -308,21 +330,23 @@ def digitalrapids(inputs,outputs,options={},callbacks=[]):
             logging.info("Video %s does not exist" % (videopath))
             return False
 
-        video = _drop_folder(videopath,inputdir,outputdir)
+        video = _drop_folder(videopath, inputdir, outputdir)
 
         from dataservice import usage_store
-        inputfilesize = os.path.getsize(videopath)
-        usage_store.record(mfileid,"http://mserve/digitalrapids",inputfilesize)
 
-        videofile = open(video,'r')
+        inputfilesize = os.path.getsize(videopath)
+        usage_store.record(mfileid, "http://mserve/digitalrapids", inputfilesize)
+
+        videofile = open(video, 'r')
 
         from jobservice.models import JobOutput
+
         jo = JobOutput.objects.get(id=joboutput)
         jo.file.save('transcode.mov', File(videofile), save=True)
 
         videofile.close()
 
-        return {"success":True,"message":"Digital Rapids transcode of video successful"}
+        return {"success": True, "message": "Digital Rapids transcode of video successful"}
 
     except Exception as e:
         logging.info("Error with digitalrapids %s" % e)
@@ -330,11 +354,10 @@ def digitalrapids(inputs,outputs,options={},callbacks=[]):
 
 
 class RequestReader:
-
     def __init__(self, tmpl, vars):
         self.finished = False
-        self.POSTSTRING = str(render_to_response(tmpl,vars,
-                mimetype='text/xml'))
+        self.POSTSTRING = str(render_to_response(tmpl, vars,
+            mimetype='text/xml'))
 
     def read_cb(self, size):
         assert len(self.POSTSTRING) <= size
@@ -348,12 +371,13 @@ class RequestReader:
     def __len__(self):
         return  len(self.POSTSTRING)
 
-class ResponseWriter:
-   def __init__(self):
-       self.contents = ''
 
-   def body_callback(self, buf):
-       self.contents = self.contents + buf
+class ResponseWriter:
+    def __init__(self):
+        self.contents = ''
+
+    def body_callback(self, buf):
+        self.contents = self.contents + buf
 
 
 def fims_transformrequest(url, vars):
@@ -370,7 +394,7 @@ def fims_transformrequest(url, vars):
         c.setopt(c.VERBOSE, 1)
     c.perform()
     status = c.getinfo(c.HTTP_CODE)
-    if status>=400:
+    if status >= 400:
         raise Exception("FIMS MEWS service returned an error %s " % status)
     c.close()
     transformjs = json.loads(transformResponseWriter.contents)
@@ -386,7 +410,7 @@ def fims_job_queryrequest(url):
         c.setopt(c.VERBOSE, 1)
     c.perform()
     status = c.getinfo(c.HTTP_CODE)
-    if status>=400:
+    if status >= 400:
         raise Exception("FIMS MEWS service returned an error %s " % status)
     c.close()
     jobjs = json.loads(jobQueryResponseWriter.contents)
@@ -395,38 +419,57 @@ def fims_job_queryrequest(url):
 
 @task
 def fims_mews(inputs, outputs, options={}, callbacks=[]):
-
     # TODO: Create the correct paths for the FIMS MEWS service to be able to
     # see the MFile content
 
-    bmcontent_locator = ""
-    jobguid = utils.unique_id()
-    transfer_locator = ""
-    transfer_destination = ""
+    try:
+        mfileid = inputs[0]
+        joboutput = outputs[0]
+        from dataservice.models import MFile
+        mf = MFile.objects.get(id=mfileid)
 
-    transform_vars = {'bmcontent_locator': bmcontent_locator,
-            'jobguid': jobguid,
-            'transfer_locator':transfer_locator,
-            'transfer_destination':transfer_destination }
+        # Using the code below we need to mount the raw mserve storage on the fims mews machine...
+        input = "%s\%s" % (settings.FIMS_MEWS_MOUNT, mf.file.path)
 
-    js = fims_transformrequest(settings.FIMS_MEWS_URL_TRANSFORM, transform_vars)
-    jobGUID = js["transformAck"]["operationInfo"]["jobID"]["jobGUID"]
+        bmcontent_locator = ""
+        jobguid = utils.unique_id()
+        transfer_locator = ""
+        transfer_destination = ""
 
-    # TODO: instead of having max_polls use the status field to break
-    # when the job fails (dont know what these statuses are yet)
-    max_polls=5
-    js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY+jobGUID)
-    status = js_resp ["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]\
-                    ["code"]
-                    
-    while status == "running" and max_polls >= 0:
-        time.sleep(5)
-        js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY+jobGUID)
-        print js_resp
-        status = js_resp ["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]\
-                    ["code"]
-        max_polls = max_polls -1
+        transform_vars = {'bmcontent_locator': bmcontent_locator,
+                          'jobguid': jobguid,
+                          'transfer_locator': transfer_locator,
+                          'transfer_destination': transfer_destination}
 
-    # TODO: Save the result from transfer_destination and transfer_locator?
+        js = fims_transformrequest(settings.FIMS_MEWS_URL_TRANSFORM, transform_vars)
+        jobGUID = js["transformAck"]["operationInfo"]["jobID"]["jobGUID"]
 
-    return js_resp
+        # TODO: instead of having max_polls use the status field to break
+        # when the job fails (dont know what these statuses are yet)
+        max_polls = 5
+        js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY + jobGUID)
+        status = js_resp["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
+
+        #while status == "running" and max_polls >= 0:
+        while status != "completed":
+            if status == "failed":
+                # Failed job
+                raise Exception("FIMS MEWS task failed")
+            elif status == "canceled":
+                # Canceled job
+                raise Exception("FIMS MEWS task canceled")
+            else:
+                time.sleep(5)
+                js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY + jobGUID)
+                print js_resp
+                status = js_resp["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
+                max_polls -= 1
+
+        # TODO: Save the result from transfer_destination and transfer_locator?
+
+        return js_resp
+
+    except Exception as e:
+
+        logging.info("Error with FIMS_MEWS %s" % e)
+        raise e

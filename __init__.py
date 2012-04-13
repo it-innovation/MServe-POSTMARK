@@ -29,7 +29,7 @@ task_descriptions['postmark.tasks.digitalrapids'] = {
         "nboutputs" : 1,
         "input-0" : { "mimetype" : "video" },
         "output-0" : { "mimetype" : "video/mp4" },
-        "options":[],
+        "options": [],
         "results" : []
 }
 task_descriptions['postmark.tasks.red3dmux'] = {
@@ -37,18 +37,26 @@ task_descriptions['postmark.tasks.red3dmux'] = {
         "nboutputs" : 1,
         "input-0" : { "mimetype" : "video" },
         "input-1" : { "mimetype" : "video" },
-        "output-0" : { "mimetype" : "image/tiff" },
-        "options":["start_frame","end_frame"],
+        "output-0" : { "mimetype" : "application/octet-stream" },
+        "options": ["start_frame","end_frame"],
         "results" : []
 }
 task_descriptions['postmark.tasks.red2dtranscode'] = {
         "nbinputs" : 1,
         "nboutputs" : 1,
         "input-0" : { "mimetype" : "video" },
-        "input-1" : { "mimetype" : "video" },
+        #"input-1" : { "mimetype" : "video" },
         "output-0" : { "mimetype" : "application/octet-stream" },
-        "options":["export_type","start_frame","end_frame"],
+        "options": ["export_type","start_frame","end_frame"],
         "results" : []
+}
+task_descriptions['postmark.tasks.fims_mews'] = {
+    "nbinputs" : 1,
+    "nboutputs" : 1,
+    "input-0" : { "mimetype" : "video" },
+    "output-0" : { "mimetype" : "application/octet-stream" },
+    "options": ["output_wrapper","output_codec"],
+    "results" : []
 }
 
 import settings

@@ -99,8 +99,7 @@ def _ssh_r2d(files, export_type, tmp_folder, start_frame=1, end_frame=2):
 
     return result
 
-def _mfile_to_mount(mf):
-    remote_mount = settings.R3D_MOUNT
+def _mfile_to_mount(remote_mount, mf):
     local_mount = settings.STORAGE_ROOT
     if mf.service.container.default_path:
         local_mount = os.path.join(settings.STORAGE_ROOT, mf.service.container.default_path)
@@ -134,7 +133,7 @@ def red2dtranscode(inputs, outputs, options={}, callbacks=[]):
         if not input_mfile.folder is None:
             input_mfiles = input_mfile.folder.mfile_set.all()
 
-        inputs = map (_mfile_to_mount, input_mfiles)
+        inputs = [ _mfile_to_mount(settings.R3D_MOUNT, mf) for mf in input_mfiles]
         remote_mount = settings.R3D_MOUNT
         local_mount = settings.STORAGE_ROOT
         if input_mfile.service.container.default_path:
@@ -164,7 +163,7 @@ def red2dtranscode(inputs, outputs, options={}, callbacks=[]):
         logging.info("output_file %s", output_file)
 
         if output_file:
-            suf = SimpleUploadedFile("mfile", output_file.read(), content_type='image/tiff')
+            suf = SimpleUploadedFile("mfile", output_file.read(), content_type='application/octet-stream')
 
             if len(outputs) > 0:
                 jo = JobOutput.objects.get(id=outputs[0])
@@ -255,7 +254,7 @@ def red3dmux(inputs, outputs, options={}, callbacks=[]):
             outputfile = open(localimage, 'r')
             #outputfile = open(remoteimage,'r')
 
-            suf = SimpleUploadedFile("mfile", outputfile.read(), content_type='image/tiff')
+            suf = SimpleUploadedFile("mfile", outputfile.read(), content_type='application/octet-stream')
 
             if len(outputs) > 0:
                 jo = JobOutput.objects.get(id=outputs[0])
@@ -379,17 +378,16 @@ class ResponseWriter:
     def body_callback(self, buf):
         self.contents = self.contents + buf
 
-
-def fims_transformrequest(url, vars):
-    transformRequestReader = RequestReader("transformRequest.tmpl.xml", vars)
-    transformResponseWriter = ResponseWriter()
+def fims_request(url, template, vars):
+    request_reader = RequestReader(template, vars)
+    response_writer = ResponseWriter()
 
     c = pycurl.Curl()
     c.setopt(c.URL, url)
     c.setopt(c.POST, 1)
-    c.setopt(c.POSTFIELDSIZE, len(transformRequestReader))
-    c.setopt(c.READFUNCTION, transformRequestReader.read_cb)
-    c.setopt(c.WRITEFUNCTION, transformResponseWriter.body_callback)
+    c.setopt(c.POSTFIELDSIZE, len(request_reader))
+    c.setopt(c.READFUNCTION, request_reader.read_cb)
+    c.setopt(c.WRITEFUNCTION, response_writer.body_callback)
     if settings.DEBUG:
         c.setopt(c.VERBOSE, 1)
     c.perform()
@@ -397,15 +395,15 @@ def fims_transformrequest(url, vars):
     if status >= 400:
         raise Exception("FIMS MEWS service returned an error %s " % status)
     c.close()
-    transformjs = json.loads(transformResponseWriter.contents)
-    return transformjs
 
+    response_js = json.loads(response_writer.contents)
+    return response_js
 
-def fims_job_queryrequest(url):
-    jobQueryResponseWriter = ResponseWriter()
+def fims_job_status_request(url):
+    job_status_response_writer = ResponseWriter()
     c = pycurl.Curl()
     c.setopt(c.URL, url)
-    c.setopt(c.WRITEFUNCTION, jobQueryResponseWriter.body_callback)
+    c.setopt(c.WRITEFUNCTION, job_status_response_writer.body_callback)
     if settings.DEBUG:
         c.setopt(c.VERBOSE, 1)
     c.perform()
@@ -413,14 +411,12 @@ def fims_job_queryrequest(url):
     if status >= 400:
         raise Exception("FIMS MEWS service returned an error %s " % status)
     c.close()
-    jobjs = json.loads(jobQueryResponseWriter.contents)
-    return jobjs
-
+    status_js = json.loads(job_status_response_writer.contents)
+    return status_js
 
 @task
 def fims_mews(inputs, outputs, options={}, callbacks=[]):
-    # TODO: Create the correct paths for the FIMS MEWS service to be able to
-    # see the MFile content
+    ''' Invokes the FIMS_MEWS service on remote mounted MServe storage '''
 
     try:
         mfileid = inputs[0]
@@ -428,29 +424,26 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
         from dataservice.models import MFile
         mf = MFile.objects.get(id=mfileid)
 
-        # Using the code below we need to mount the raw mserve storage on the fims mews machine...
-        input = "%s\%s" % (settings.FIMS_MEWS_MOUNT, mf.file.path)
+        # Using the code below we need to mount the raw MServe storage on the fims mews machine.
+        bm_content_locator = _mfile_to_mount(settings.FIMS_MEWS_MOUNT, mf)
+        job_uid = utils.unique_id()
+        local_mount = settings.STORAGE_ROOT
+        if mf.service.container.default_path:
+            local_mount = os.path.join(settings.STORAGE_ROOT, mf.service.container.default_path)
+        transfer_destination = os.path.join(local_mount,job_guid)
 
-        bmcontent_locator = ""
-        jobguid = utils.unique_id()
-        transfer_locator = ""
-        transfer_destination = ""
+        transform_vars = {'bm_content_locator': bm_content_locator,
+                          'job_uid': job_uid,
+                          'transfer_destination': transfer_destination,
+                          'output_wrapper': inputs[1],
+                          'output_codec': inputs[2]}
 
-        transform_vars = {'bmcontent_locator': bmcontent_locator,
-                          'jobguid': jobguid,
-                          'transfer_locator': transfer_locator,
-                          'transfer_destination': transfer_destination}
+        job_returned_js = fims_request(settings.FIMS_MEWS_URL_TRANSFORM, "transformRequest.xml", transform_vars)
+        job_returned_uid = job_returned_js["transformAck"]["operationInfo"]["jobID"]["jobGUID"]
 
-        js = fims_transformrequest(settings.FIMS_MEWS_URL_TRANSFORM, transform_vars)
-        jobGUID = js["transformAck"]["operationInfo"]["jobID"]["jobGUID"]
+        status_returned_js = fims_job_status_request(settings.FIMS_MEWS_URL_JOBQUERY + job_returned_uid)
+        status = status_returned_js["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
 
-        # TODO: instead of having max_polls use the status field to break
-        # when the job fails (dont know what these statuses are yet)
-        max_polls = 5
-        js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY + jobGUID)
-        status = js_resp["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
-
-        #while status == "running" and max_polls >= 0:
         while status != "completed":
             if status == "failed":
                 # Failed job
@@ -460,16 +453,37 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
                 raise Exception("FIMS MEWS task canceled")
             else:
                 time.sleep(5)
-                js_resp = fims_job_queryrequest(settings.FIMS_MEWS_URL_JOBQUERY + jobGUID)
-                print js_resp
-                status = js_resp["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
-                max_polls -= 1
+                status_returned_js = fims_job_status_request(settings.FIMS_MEWS_URL_JOBQUERY + job_returned_uid)
+                print status_returned_js
+                status = status_returned_js["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
 
-        # TODO: Save the result from transfer_destination and transfer_locator?
+        files = os.listdir(transfer_destination)
+        temp_archive = tempfile.NamedTemporaryFile('wb')
+        zip_files(temp_archive.name, transfer_destination, files)
+        output_file = open(temp_archive.name, 'r')
 
-        return js_resp
+        logging.info("output_file %s", output_file)
+
+        if output_file:
+            suf = SimpleUploadedFile("mfile", output_file.read(), content_type='application/octet-stream')
+
+            if len(outputs) > 0:
+                jo = JobOutput.objects.get(joboutput)
+                jo.file.save('results.zip', suf, save=True)
+            else:
+                logging.error("Nowhere to save output")
+
+            output_file.close()
+        else:
+            raise Exception("Unable to get output_file location")
+
+        # Clean up
+        clean_up_vars = {'job_uid': job_returned_uid,
+                         'command': "cleanup"}
+        clean_up_returned_js = fims_request(settings.FIMS_MEWS_URL_MANAGE, "manageJobRequest.xml", clean_up_vars)
+
+        return status_returned_js
 
     except Exception as e:
-
         logging.info("Error with FIMS_MEWS %s" % e)
         raise e

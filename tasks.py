@@ -436,7 +436,7 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
         local_mount = settings.STORAGE_ROOT
         if mf.service.container.default_path:
             local_mount = os.path.join(settings.STORAGE_ROOT, mf.service.container.default_path)
-        transfer_destination = os.path.join(local_mount,job_guid)
+        transfer_destination = os.path.join(local_mount,job_uid)
 
         transform_vars = {'bm_content_locator': bm_content_locator,
                           'job_uid': job_uid,

@@ -89,13 +89,15 @@ def _ssh_r2d(files, export_type, tmp_folder, start_frame=1, end_frame=2):
     ssh.connect(settings.R3D_HOST, username=settings.R3D_USER, password=settings.R3D_PASS)
 
     for file in files:
-        command = "redline --i %s --outDir %s --exportPreset %s -s %s -e %s" % (file, tmp_folder, export_type, start_frame, end_frame)
-        logging.info(command)
+        test_filename = file.lower()
+        if (test_filename.endswith(".r3d")):
+            command = "redline --i %s --outDir %s --exportPreset %s -s %s -e %s" % (file, tmp_folder, export_type, start_frame, end_frame)
+            logging.info(command)
 
-        stdin, stdout, stderr = ssh.exec_command(command)
-        result[file] = {}
-        result[file]["stdout"] = stdout.readlines()
-        result[file]["sdterr"] = stderr.readlines()
+            stdin, stdout, stderr = ssh.exec_command(command)
+            result[file] = {}
+            result[file]["stdout"] = stdout.readlines()
+            result[file]["sdterr"] = stderr.readlines()
 
     return result
 

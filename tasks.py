@@ -91,7 +91,11 @@ def _ssh_r2d(files, export_type, tmp_folder, start_frame=1, end_frame=2):
     for file in files:
         test_filename = file.lower()
         if (test_filename.endswith(".r3d")):
-            command = "redline --i %s --outDir %s --exportPreset %s -s %s -e %s" % (file, tmp_folder, export_type, start_frame, end_frame)
+            command = "redline --i %s --outDir %s --exportPreset %s" % (file, tmp_folder, export_type)
+            if (start_frame > -1):
+                command += " -s %s" % (start_frame)
+            if (end_frame > -1):
+                command += " -e %s" % (end_frame)
             logging.info(command)
 
             stdin, stdout, stderr = ssh.exec_command(command)
@@ -118,11 +122,11 @@ def red2dtranscode(inputs, outputs, options={}, callbacks=[]):
     if len(inputs) > 0: 
         input_mfile = MFile.objects.get(id=inputs[0])
 
-        start_frame = 1
+        start_frame = -1
         if "start_frame" in options:
             start_frame = options["start_frame"]
 
-        end_frame = 2
+        end_frame = -1
         if "end_frame" in options:
             end_frame = options["end_frame"]
 

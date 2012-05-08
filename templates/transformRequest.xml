@@ -15,7 +15,7 @@ used to drive Marquis FIMS engine (MEWS)
       <description xmlns="http://base.fims.tv">MarquisEDL</description>
       <!--locator describes the location of the source media - this must be "smb" or "file"
       for the MEWS service-->
-      <locator xmlns="http://base.fims.tv">{{bm_content_locator}}</locator>
+      <locator xmlns="http://base.fims.tv">smb:{{bm_content_locator}}</locator>
     </bmContent>
   </bmo>
   <!--outputFileNamePattern - currently ignored by MEWS.  Output filename will be based 
@@ -97,7 +97,7 @@ used to drive Marquis FIMS engine (MEWS)
       <!--destination - folder path where the output file should be written.  MEWS always writes
       over SMB/CIFS mounted file systems, so this must be "smb" or "file"-->
       <!--<locator xmlns="http://base.fims.tv">\{\{transfer_locator\}\}</locator>-->
-      <destination xmlns="http://base.fims.tv" >{{transfer_destination}}</destination>
+      <destination xmlns="http://base.fims.tv" >smb:{{transfer_destination}}</destination>
     </transferAtom>
   </transformProfile>
 </transformRequest>

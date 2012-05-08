@@ -51,12 +51,12 @@ task_descriptions['postmark.tasks.red2dtranscode'] = {
         "results" : []
 }
 task_descriptions['postmark.tasks.fims_mews'] = {
-    "nbinputs" : 1,
-    "nboutputs" : 1,
-    "input-0" : { "mimetype" : "video" },
-    "output-0" : { "mimetype" : "application/octet-stream" },
-    "options": ["output_wrapper","output_codec"],
-    "results" : []
+        "nbinputs" : 1,
+        "nboutputs" : 1,
+        "input-0" : { "mimetype" : "video" },
+        "output-0" : { "mimetype" : "application/octet-stream" },
+        "options": ["output_wrapper","output_codec"],
+        "results" : []
 }
 
 import settings

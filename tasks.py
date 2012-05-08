@@ -30,6 +30,7 @@ import tempfile
 import datetime
 import shutil
 import os.path
+import ntpath
 import time
 import dataservice.utils as utils
 import settings as settings
@@ -44,6 +45,8 @@ from ssh import MultiSSHClient
 from dataservice.models import MFile
 from jobservice.models import JobOutput
 from django.shortcuts import render_to_response
+from django.template import Context, Template
+from django.template.loader import render_to_string
 
 def tar_files(temp_tarfile, base_dir, files):
     tar = tarfile.open(temp_tarfile, "w:gz")
@@ -361,8 +364,9 @@ def digitalrapids(inputs, outputs, options={}, callbacks=[]):
 class RequestReader:
     def __init__(self, tmpl, vars):
         self.finished = False
-        self.POSTSTRING = str(render_to_response(tmpl, vars,
-            mimetype='text/xml'))
+        #self.POSTSTRING = str(render_to_response(tmpl, vars,
+        #    mimetype='text/xml'))
+        self.POSTSTRING = str(render_to_string(tmpl, vars))
 
     def read_cb(self, size):
         assert len(self.POSTSTRING) <= size
@@ -376,6 +380,9 @@ class RequestReader:
     def __len__(self):
         return  len(self.POSTSTRING)
 
+    def poststring(self):
+        return self.POSTSTRING
+
 
 class ResponseWriter:
     def __init__(self):
@@ -387,15 +394,18 @@ class ResponseWriter:
 def fims_request(url, template, vars):
     request_reader = RequestReader(template, vars)
     response_writer = ResponseWriter()
+    headers = [ "Content-Type: text/xml; charset: UTF-8; " ]
 
     c = pycurl.Curl()
     c.setopt(c.URL, url)
     c.setopt(c.POST, 1)
-    c.setopt(c.POSTFIELDSIZE, len(request_reader))
+    c.setopt(c.POSTFIELDSIZE, request_reader.__len__())
     c.setopt(c.READFUNCTION, request_reader.read_cb)
     c.setopt(c.WRITEFUNCTION, response_writer.body_callback)
+    c.setopt(c.HTTPHEADER, headers)
     if settings.DEBUG:
         c.setopt(c.VERBOSE, 1)
+        logging.debug("Request body: %s", request_reader.poststring())
     c.perform()
     status = c.getinfo(c.HTTP_CODE)
     if status >= 400:
@@ -429,25 +439,34 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
         joboutput = outputs[0]
         from dataservice.models import MFile
         mf = MFile.objects.get(id=mfileid)
-
-        # Using the code below we need to mount the raw MServe storage on the fims mews machine.
-        bm_content_locator = _mfile_to_mount(settings.FIMS_MEWS_MOUNT, mf)
         job_uid = utils.unique_id()
+
+        # We need to create the destination folder
         local_mount = settings.STORAGE_ROOT
         if mf.service.container.default_path:
             local_mount = os.path.join(settings.STORAGE_ROOT, mf.service.container.default_path)
-        transfer_destination = os.path.join(local_mount,job_uid)
+        local_destination = os.path.join(local_mount, "fims_mews", job_uid)
+        if not os.path.exists(local_destination):
+            os.makedirs(local_destination)
 
+        # Using the code below we need to mount the raw MServe storage on the fims mews machine.
+        bm_content_locator = ntpath.normpath(_mfile_to_mount(settings.FIMS_MEWS_MOUNT, mf))
+        mews_mount = settings.FIMS_MEWS_MOUNT
+        transfer_destination = ntpath.normpath(ntpath.join(mews_mount, "fims_mews", job_uid))
+        transfer_destination += "\\"
+        
         transform_vars = {'bm_content_locator': bm_content_locator,
                           'job_uid': job_uid,
                           'transfer_destination': transfer_destination,
-                          'output_wrapper': inputs[1],
-                          'output_codec': inputs[2]}
+                          'output_wrapper': options["output_wrapper"],
+                          'output_codec': options["output_codec"]}
 
         job_returned_js = fims_request(settings.FIMS_MEWS_URL_TRANSFORM, "transformRequest.xml", transform_vars)
+        logging.debug("FIMS Transform Request returned: %s", job_returned_js)
         job_returned_uid = job_returned_js["transformAck"]["operationInfo"]["jobID"]["jobGUID"]
 
         status_returned_js = fims_job_status_request(settings.FIMS_MEWS_URL_JOBQUERY + job_returned_uid)
+        logging.debug("FIMS Transform Service Status Request returned: %s", status_returned_js)
         status = status_returned_js["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
 
         while status != "completed":
@@ -460,12 +479,12 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
             else:
                 time.sleep(5)
                 status_returned_js = fims_job_status_request(settings.FIMS_MEWS_URL_JOBQUERY + job_returned_uid)
-                print status_returned_js
+                logging.debug("Service status returned: %s", status_returned_js)
                 status = status_returned_js["queryJobRequest"]["queryJobInfo"]["jobInfo"]["status"]["code"]
 
-        files = os.listdir(transfer_destination)
+        files = os.listdir(local_destination)
         temp_archive = tempfile.NamedTemporaryFile('wb')
-        zip_files(temp_archive.name, transfer_destination, files)
+        zip_files(temp_archive.name, local_destination, files)
         output_file = open(temp_archive.name, 'r')
 
         logging.info("output_file %s", output_file)
@@ -474,7 +493,7 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
             suf = SimpleUploadedFile("mfile", output_file.read(), content_type='application/octet-stream')
 
             if len(outputs) > 0:
-                jo = JobOutput.objects.get(joboutput)
+                jo = JobOutput.objects.get(id=joboutput)
                 jo.file.save('results.zip', suf, save=True)
             else:
                 logging.error("Nowhere to save output")
@@ -488,7 +507,7 @@ def fims_mews(inputs, outputs, options={}, callbacks=[]):
                          'command': "cleanup"}
         clean_up_returned_js = fims_request(settings.FIMS_MEWS_URL_MANAGE, "manageJobRequest.xml", clean_up_vars)
 
-        return status_returned_js
+        return {"success": True, "message": "FIMS_MEWS transcode of video successful"}
 
     except Exception as e:
         logging.info("Error with FIMS_MEWS %s" % e)
